@@ -1,0 +1,568 @@
+library(tidyverse)
+library(vctrs)
+library(tidyselect)
+library(naniar)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(survey)
+library(rafalib)
+library(modelr)
+library(na.tools)
+library(ggimage)
+library(ggrepel)
+library(remotes)
+library(glue)
+library(readr)
+library(devtools)
+library(nflscrapR)
+library(nflfastR)
+library(teamcolors)
+
+seasons <- 1999:2020
+pbp_Original <- purrr::map_df(seasons, function(x) {
+  readRDS(
+    url(
+      glue::glue("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_{x}.rds")
+    )
+  )
+})
+
+roster <- readRDS(url("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/roster-data/roster.rds"))
+
+pbp_Original <- pbp_Original %>% 
+  mutate_at(vars(home_team, away_team, posteam, defteam, td_team), funs(case_when(
+    . %in% "JAX" ~ "JAC",
+    . %in% "STL" ~ "LA",
+    . %in% "SD" ~ "LAC",
+    . %in% "OAK" ~ "LV",
+    TRUE ~ .
+  ))) 
+
+pbp_Original$play_id <- 1:nrow(pbp_Original)
+pbp <- pbp_Original
+
+# FIXING SOME MISCELLANEOUS ERRORS HERE (before getting into the series column)
+ShouldBeLabeledNoPlay <- pbp %>% filter(timeout == 1 & play_type != "no_play" 
+                         & !str_detect(desc, "(Challenge)") & !str_detect(desc, "(challenge)") & str_detect(desc, "(Timeout)"))
+ShouldBeLabeledNoPlayVec <- ShouldBeLabeledNoPlay$play_id
+pbp[ShouldBeLabeledNoPlayVec, "play_type"] <- "no_play"
+
+WronglyLabeledTimeout <- pbp %>% filter(timeout == 1 & play_type != "no_play" 
+                                                 & !str_detect(desc, "(Challenge)") & !str_detect(desc, "(challenge)") & !str_detect(desc, "(Timeout)"))
+WronglyLabeledTimeoutVec <- WronglyLabeledTimeout$play_id
+pbp[WronglyLabeledTimeoutVec, "timeout"] <- 0
+
+WrongLabelPATAsNoPlay <-  pbp %>% filter(extra_point_attempt == 1 & play_type != "extra_point")
+WrongLabelPATAsNoPlayVec <- WrongLabelPATAsNoPlay$play_id
+pbp[WrongLabelPATAsNoPlayVec, "play_type"] <- "extra_point"
+
+WrongLabelTwoMinWarning <- pbp %>% filter( ((!is.na(play_type)) | (!is.na(play_type_nfl))) &
+                                             ( (str_detect(desc, "(Two-Minute)")) |
+                                                 (str_detect(desc, "(Two-minute)"))))
+WrongLabelTwoMinVec <- WrongLabelTwoMinWarning$play_id
+pbp[WrongLabelTwoMinVec, "play_type"] <- NA
+pbp[WrongLabelTwoMinVec, "play_type_nfl"] <- NA
+
+# One play missing here, now the 2nd down right BEFORE Batch is sacked, 13:27
+# View(pbp %>% filter(game_id == "1999_16_DEN_DET", qtr == 4))
+
+# Missing play here, shortly before 8:22 FG (1st down before Dillon run)
+# View(pbp %>% filter(game_id == "1999_05_CIN_CLE", qtr == 1))
+
+# Missing play here, right after 11:25 DPI
+# View(pbp %>% filter(game_id == "1999_08_TB_DET", qtr == 4))
+
+# Missing play right before 3:02 NE ineligible man downfield
+# View(pbp %>% filter(game_id == "1999_15_NE_PHI", qtr == 2))
+
+# Missing play right after 13:40 Chandler-to-Mathis 12-yard completion
+# View(pbp %>% filter(game_id == "1999_17_SF_ATL", qtr == 2))
+
+# Missing play right before 6:22 Warren run
+# View(pbp %>% filter(game_id == "1999_18_DAL_MIN", qtr == 4))
+
+# Missing play right after 9:19 Davis 7-yard run
+# View(pbp %>% filter(game_id == "2000_03_DAL_WAS", qtr == 4))
+
+Useless_NoSnap <- pbp %>% 
+  filter( (penalty == 0 & 
+             (timeout > 0 & play_type == "no_play")) |
+            ( is.na(play_type) & 
+                (is.na(play_type_nfl) | (play_type_nfl != "PENALTY" & play_type_nfl != "FREE_KICK" & play_type_nfl != "KICK_OFF"))))
+Useless_NoSnap_Vec <- Useless_NoSnap$play_id
+
+pbp <- pbp %>% filter(!play_id %in% Useless_NoSnap_Vec)
+pbp$play_id <- 1:nrow(pbp)
+
+# Weird data entry error here
+WrongRunPassLabel <- pbp %>% filter(play_type == "run" & rush == 0 & pass == 0)
+WrongRunPassLabelID <- WrongRunPassLabel$play_id
+pbp[WrongRunPassLabelID, "rush"] <- 1
+
+# Some data entry errors here:
+WronglyLabeledAsPunt <- pbp %>% filter(punt_attempt == 1 & 
+                                !str_detect(desc, "(Punt)") & !str_detect(desc, "(punt)"))
+WronglyLabeledAsPuntVec <- WronglyLabeledAsPunt$play_id
+pbp[WronglyLabeledAsPuntVec, "punt_attempt"] <- 0
+# Fix the play_types manually
+# View(pbp %>% filter(game_id == "2000_06_WAS_PHI", qtr == 2)), 2 of final 3 plays of half
+pbp[56335:56336, "play_type"] <- "run"
+# View(pbp %>% filter(game_id == "2002_03_DAL_PHI", qtr == 4)), 9:30 to go
+pbp[132523, "play_type"] <- "run"
+
+WronglyLabeledAsFumLost <- pbp %>% filter(fumble_lost == 1 & !str_detect(desc, "(Fumble)") & 
+                                  !str_detect(desc, "(fumble)") & !str_detect(desc, "(FUMBLE)") &
+                                    !str_detect(desc, "(muff)") & !str_detect(desc, "(Muff)") &
+                                    !str_detect(desc, "(MUFF)") & !str_detect(desc, "(recover)") &
+                                    !str_detect(desc, "(Recover)") & !str_detect(desc, "(RECOVER)"))
+WronglyLabeledAsFumLostVec <- WronglyLabeledAsFumLost$play_id
+pbp[WronglyLabeledAsFumLostVec, "fumble_lost"] <- 0
+
+# A few egregious data entry errors here:
+WronglyLabeledAsFGAtt <- pbp %>% filter(field_goal_attempt == 1 & !str_detect(desc, "(goal)") & 
+                                            !str_detect(desc, "(Goal)") & !str_detect(desc, "(GOAL)"))
+WronglyLabeledAsFGAttVec <- WronglyLabeledAsFGAtt$play_id
+pbp[WronglyLabeledAsFGAttVec, "field_goal_attempt"] <- 0
+pbp[WronglyLabeledAsFGAttVec, "field_goal_result"] <- NA
+# Fix play_type, posteam manually
+# View(pbp %>% filter(game_id == "2000_11_OAK_DEN", qtr == 3)), 7-9 minutes left
+pbp[67642, "play_type"] <- "pass"
+pbp[67643, "play_type"] <- "run"
+pbp[67645, "play_type"] <- "kickoff"
+pbp[67642:67644, "posteam"] <- "DEN"
+pbp[67642:67644, "defteam"] <- "LV"
+pbp[67642:67644, "posteam_type"] <- "home"
+
+WronglyLabeledAsKickoff <- pbp %>% filter(kickoff_attempt == 1 & !str_detect(desc, "(kick)") & 
+                                          !str_detect(desc, "(Kick)") & !str_detect(desc, "(KICK)"))
+WronglyLabeledAsKickoffVec <- WronglyLabeledAsKickoff$play_id
+pbp[WronglyLabeledAsKickoffVec, "kickoff_attempt"] <- 0
+
+# An error here:
+# View(pbp %>% filter(game_id == "2012_04_CLE_BAL", qtr == 4)), 2nd to last play of game
+pbp[569271, "fourth_down_failed"] <- 0
+
+# Another not too important error
+# View(pbp %>% filter(game_id == "2018_01_ATL_PHI", qtr == 1)), 10:55 left
+pbp[827487, "fourth_down_failed"] <- 1
+
+# Also not important
+# View(pbp %>% filter(game_id == "2000_05_IND_BUF", qtr == 2)), final play of half
+pbp[52818, "play_type"] <- "qb_kneel"
+
+# A weird situation (offsides, but first down given on 3rd and 15?)
+# View(pbp %>% filter(game_id == "1999_10_SF_NO", qtr == 1)), 9:37 left
+pbp[22971, "first_down_penalty"] <- 1
+pbp[22971, "first_down"] <- 1
+
+# Another odd situation (defensive delay of game leads to first)
+# View(pbp %>% filter(game_id == "2000_17_ARI_WAS", qtr == 1)), 5:05 left
+pbp[80455, "first_down_penalty"] <- 1
+pbp[80455, "first_down"] <- 1
+
+# Another error
+# View(pbp %>% filter(game_id == "2006_10_WAS_PHI", qtr == 2)), 7:25 left
+pbp[324039, "first_down_penalty"] <- 1
+pbp[324039, "first_down"] <- 1
+
+# Another error
+# View(pbp %>% filter(game_id == "2005_04_MIN_ATL", qtr == 3)), 12:02 left
+pbp[266050, "first_down_penalty"] <- 1
+pbp[266050, "first_down"] <- 1
+
+# Many errors here
+# View(pbp %>% filter(game_id == "2018_01_ATL_PHI"))
+# 8:23 Q2 DPI
+pbp[827525, "first_down_penalty"] <- 1
+pbp[827525, "first_down"] <- 1
+# 2nd to last play of 1st half
+pbp[827559, "first_down_penalty"] <- 1
+pbp[827559, "first_down"] <- 1
+# 1st play of Q4
+pbp[827603, "first_down_penalty"] <- 1
+pbp[827603, "first_down"] <- 1
+# 2nd to last play of game
+pbp[827647, "first_down_penalty"] <- 1
+pbp[827647, "first_down"] <- 1
+
+# Another error
+# View(pbp %>% filter(game_id == "2000_03_NYG_CHI", qtr == 4)), 3rd and 2 at 9:24
+pbp[49030, "first_down"] <- 1
+pbp[49030, "first_down_rush"] <- 1
+
+# Another error
+# View(pbp %>% filter(game_id == "2000_16_OAK_SEA", qtr == 3)), 1:12 left
+pbp[79728, "down"] <- 3
+pbp[79728, "ydstogo"] <- 5
+
+# Another error
+# View(pbp %>% filter(game_id == "2007_03_STL_TB", qtr == 3)), 8:41 3rd down
+pbp[351346, "first_down"] <- 1
+pbp[351346, "first_down_rush"] <- 1
+pbp[351346, "yards_gained"] <- 6
+
+# Another error
+# View(pbp %>% filter(game_id == "2009_12_TB_ATL", qtr == 2)), 2nd and 14, 2:00
+pbp[457794, "first_down_penalty"] <- 1
+pbp[457794, "first_down"] <- 1
+
+# More data entry errors here:
+# View(pbp %>% filter(game_id == "1999_14_MIN_KC", qtr == 2)), ending with 0:29 TD
+pbp[32289, "play_id"] <- 32286
+pbp[32286, "play_id"] <- 32287
+pbp[32287, "play_id"] <- 32288
+pbp[32288, "play_id"] <- 32289
+# View(pbp %>% filter(game_id == "2000_01_TEN_BUF", qtr == 1)), 1:35 offsides
+pbp[45056, "play_id"] <- 45057
+pbp[45057, "play_id"] <- 45056
+# View(pbp %>% filter(game_id == "2000_02_CAR_SF", qtr == 2)), 3rd/4th down at 1:23
+pbp[45432, "play_id"] <- 45433
+pbp[45433, "play_id"] <- 45432
+# View(pbp %>% filter(game_id == "2000_02_WAS_DET", qtr == 1)), 9:37 FG
+pbp[47513, "play_id"] <- 47514
+pbp[47514, "play_id"] <- 47513
+# View(pbp %>% filter(game_id == "2000_03_ATL_CAR", qtr == 2)), ending in 1:42 run
+pbp[47719, "play_id"] <- 47716
+pbp[47716, "play_id"] <- 47717
+pbp[47717, "play_id"] <- 47718
+pbp[47718, "play_id"] <- 47719
+# View(pbp %>% filter(game_id == "2000_04_WAS_NYG", qtr == 2)), 2 plays after 6:27 KO
+pbp[51837, "play_id"] <- 51838
+pbp[51838, "play_id"] <- 51837
+# View(pbp %>% filter(game_id == "2000_06_PIT_NYJ", qtr == 4)), 2:20 INT
+pbp[55773, "play_id"] <- 55774
+pbp[55774, "play_id"] <- 55773
+# View(pbp %>% filter(game_id == "2000_07_BAL_WAS", qtr == 2)), 6:27 1st/2nd down
+pbp[56650, "play_id"] <- 56651
+pbp[56651, "play_id"] <- 56650
+# View(pbp %>% filter(game_id == "2000_07_JAX_TEN", qtr == 4)), 2:15 2nd/3rd down
+pbp[57714, "play_id"] <- 57715
+pbp[57715, "play_id"] <- 57714
+# View(pbp %>% filter(game_id == "2000_09_TEN_WAS", qtr == 4)), 7:45 2nd/3rd down
+pbp[63293, "play_id"] <- 63294
+pbp[63294, "play_id"] <- 63293
+# View(pbp %>% filter(game_id == "2000_11_NYJ_IND", qtr == 2)), 7:07 1st/2nd down
+pbp[67430, "play_id"] <- 67431
+pbp[67431, "play_id"] <- 67430
+# View(pbp %>% filter(game_id == "2000_11_CHI_BUF", qtr == 4)), 4:30 3rd/4th down
+pbp[66393, "play_id"] <- 66394
+pbp[66394, "play_id"] <- 66393
+# View(pbp %>% filter(game_id == "2000_13_PHI_WAS", qtr == 2)), starts at 13:50
+pbp[72755, "play_id"] <- 72757
+pbp[72756, "play_id"] <- 72755
+pbp[72757, "play_id"] <- 72756
+# View(pbp %>% filter(game_id == "2000_14_SEA_ATL", qtr == 3)), 12:25 1st/2nd down
+pbp[75098, "play_id"] <- 75099
+pbp[75099, "play_id"] <- 75098
+# View(pbp %>% filter(game_id == "2000_17_CIN_PHI", qtr == 4)), 0:49 is messed up play
+pbp[81215, "play_id"] <- 81202
+pbp[81202, "play_id"] <- 81203
+pbp[81203, "play_id"] <- 81204
+pbp[81204, "play_id"] <- 81205
+pbp[81205, "play_id"] <- 81206
+pbp[81206, "play_id"] <- 81207
+pbp[81207, "play_id"] <- 81208
+pbp[81208, "play_id"] <- 81209
+pbp[81209, "play_id"] <- 81210
+pbp[81210, "play_id"] <- 81211
+pbp[81211, "play_id"] <- 81212
+pbp[81212, "play_id"] <- 81213
+pbp[81213, "play_id"] <- 81214
+pbp[81214, "play_id"] <- 81215
+# View(pbp %>% filter(game_id == "2004_09_PHI_PIT", qtr == 2)), 6:14 kickoff/FG
+pbp[234545, "play_id"] <- 234546
+pbp[234546, "play_id"] <- 234545
+# View(pbp %>% filter(game_id == "2004_09_CLE_BAL", qtr == 2)), 3:09 kickoff/FG
+pbp[233119, "play_id"] <- 233120
+pbp[233120, "play_id"] <- 233119
+# View(pbp %>% filter(game_id == "2001_03_KC_WAS", qtr == 4)), 8:36 1st/2nd down
+pbp[90538, "play_id"] <- 90539
+pbp[90539, "play_id"] <- 90538
+# View(pbp %>% filter(game_id == "2001_05_PIT_KC", qtr == 2)), 0:32 safety/kickoff
+pbp[95431, "play_id"] <- 95432
+pbp[95432, "play_id"] <- 95431
+# View(pbp %>% filter(game_id == "2004_02_NE_ARI", qtr == 4)), 11:20 2nd/3rd down
+pbp[218079, "play_id"] <- 218080
+pbp[218080, "play_id"] <- 218079
+# View(pbp %>% filter(game_id == "2004_07_DAL_GB", qtr == 4)), 3:27 false start
+pbp[228742, "play_id"] <- 228743
+pbp[228743, "play_id"] <- 228742
+# View(pbp %>% filter(game_id == "2004_15_WAS_SF", qtr == 1)), final play of qtr should be 4th
+pbp[250272, "play_id"] <- 250240
+pbp[250240, "play_id"] <- 250241
+pbp[250241, "play_id"] <- 250242
+pbp[250242, "play_id"] <- 250243
+pbp[250243, "play_id"] <- 250244
+pbp[250244, "play_id"] <- 250245
+pbp[250245, "play_id"] <- 250246
+pbp[250246, "play_id"] <- 250247
+pbp[250247, "play_id"] <- 250248
+pbp[250248, "play_id"] <- 250249
+pbp[250249, "play_id"] <- 250250
+pbp[250250, "play_id"] <- 250251
+pbp[250251, "play_id"] <- 250252
+pbp[250252, "play_id"] <- 250253
+pbp[250253, "play_id"] <- 250254
+pbp[250254, "play_id"] <- 250255
+pbp[250255, "play_id"] <- 250256
+pbp[250256, "play_id"] <- 250257
+pbp[250257, "play_id"] <- 250258
+pbp[250258, "play_id"] <- 250259
+pbp[250259, "play_id"] <- 250260
+pbp[250260, "play_id"] <- 250261
+pbp[250261, "play_id"] <- 250262
+pbp[250262, "play_id"] <- 250263
+pbp[250263, "play_id"] <- 250264
+pbp[250264, "play_id"] <- 250265
+pbp[250265, "play_id"] <- 250266
+pbp[250266, "play_id"] <- 250267
+pbp[250267, "play_id"] <- 250268
+pbp[250268, "play_id"] <- 250269
+pbp[250269, "play_id"] <- 250270
+pbp[250270, "play_id"] <- 250271
+pbp[250271, "play_id"] <- 250272
+# View(pbp %>% filter(game_id == "2006_08_DAL_CAR", qtr == 4)), 8:04 offsides
+pbp[317680, "play_id"] <- 317681
+pbp[317681, "play_id"] <- 317680
+# View(pbp %>% filter(game_id == "2007_02_HOU_CAR", qtr == 2)), 0:45 3rd/4th down
+pbp[347288, "play_id"] <- 347289
+pbp[347289, "play_id"] <- 347288
+# View(pbp %>% filter(game_id == "2007_06_CIN_KC", qtr == 4)), 3:29 false start
+pbp[356327, "play_id"] <- 356328
+pbp[356328, "play_id"] <- 356327
+# View(pbp %>% filter(game_id == "2009_11_MIA_CAR", qtr == 3)), 2:41 punt
+pbp[453996, "play_id"] <- 453995
+pbp[453995, "play_id"] <- 453996
+# View(pbp %>% filter(game_id == "2010_09_NYG_SEA", qtr == 3)), 1:15 clock reset
+pbp[493447, "play_id"] <- 493446
+pbp[493446, "play_id"] <- 493447
+# View(pbp %>% filter(game_id == "2010_19_SEA_CHI", qtr == 4)), 1:24 XP/kickoff
+pbp[515900, "play_id"] <- 515899
+pbp[515899, "play_id"] <- 515900
+# View(pbp %>% filter(game_id == "2013_13_JAX_CLE", qtr == 3)), 9:44 PAT penalty
+pbp[636010, "play_id"] <- 636011
+pbp[636011, "play_id"] <- 636010
+# View(pbp %>% filter(game_id == "2014_06_DEN_NYJ", qtr == 2)), 0:27 PAT penalty
+pbp[663427, "play_id"] <- 663428
+pbp[663428, "play_id"] <- 663427
+pbp <- arrange(pbp, play_id)
+
+# Two field goals from View(pbp %>% filter(game_id == "2009_11_SD_DEN", qtr %in% c(2, 4)))
+# This fix is b/c they erroneously had the phrase "extra point" in the "desc" column
+pbp[454755, "desc"] <- "Penalty occurred after the field goal and will be assessed on the kickoff.  PENALTY on DEN-M.Thomas, Unsportsmanlike Conduct, 15 yards, enforced at SD 30 - No Play."
+pbp[454822, "desc"] <- "Penalty occurred after the field goal and will be assessed on the kickoff.  PENALTY on DEN-R.Fields, Unsportsmanlike Conduct, 15 yards, enforced at SD 30 - No Play."
+
+# These plays have play == 0 and special == 0, for some reason (ERRORS)
+IncorrectPlayLabel <- 
+  pbp %>% filter(!is.na(down) & play_type != "qb_kneel" & play_type != "qb_spike" &
+                   play == 0 & special == 0)
+# None of these plays are special teams
+IncorrectPlayLabelVec <- IncorrectPlayLabel$play_id
+pbp[IncorrectPlayLabelVec, "play"] <- 1
+
+# These ones should have play == 0
+IncorrectPuntLabel <- pbp %>% filter(special == 0 & play_type != "pass" & play_type != "run" & 
+                                     (str_detect(pbp$desc, "(punts)") | str_detect(pbp$desc, "(punt is BLOCKED)")))
+IncorrectPuntLabelID <- IncorrectPuntLabel$play_id
+pbp[IncorrectPuntLabelID, "special"] <- 1
+pbp[IncorrectPuntLabelID, "play"] <- 0
+
+IncorrectFGLabel <- pbp %>% filter(play_type == "no_play" & special == 0 & 
+                                     !is.na(field_goal_result))
+IncorrectFGLabelID <- IncorrectFGLabel$play_id
+pbp[IncorrectFGLabelID, "special"] <- 1
+pbp[IncorrectFGLabelID, "play"] <- 0
+
+IncorrectPATLabel <- pbp %>% filter(play == 1 & rush == 0 & pass == 0 & play_type != "no_play")
+IncorrectPATLabelID <- IncorrectPATLabel$play_id
+pbp[IncorrectPATLabelID, "special"] <- 1
+pbp[IncorrectPATLabelID, "play"] <- 0
+
+Incorrect2PtLabel <- pbp %>% filter(two_point_attempt == 1 & play == 0)
+Incorrect2PtLabelID <- Incorrect2PtLabel$play_id
+pbp[Incorrect2PtLabelID, "play"] <- 1
+
+pbp <- pbp %>% group_by(game_id, game_half) %>% 
+  mutate(LastPlayOfHalf = as.numeric(play_id == max(play_id))) %>% 
+  ungroup()
+
+pbp <- pbp %>% group_by(game_id, game_half) %>% 
+  mutate(FirstPlayOfHalf = as.numeric(play_id == min(play_id))) %>% 
+  ungroup()
+
+pbp <- pbp %>% group_by(game_id) %>% 
+  mutate(FirstPlayOfGame = as.numeric(play_id == min(play_id))) %>% 
+  ungroup()
+
+pbp <- pbp %>% mutate(posteam_win = 
+    case_when(
+      (result > 0 & posteam == home_team) | (result < 0 & posteam == away_team) ~ 1,
+      (result < 0 & posteam == home_team) | ( result > 0 & posteam == away_team) ~ 0,
+      result == 0 ~ 0.5))
+
+pbp <- pbp %>%
+  mutate(EndGamePtDiff = ifelse(posteam_type == "home", result, (-1 * result)))
+
+# CREATE THE "NewDrive" COLUMN; THIS IS RELEVANT TO "NewSeries" LATER
+# Recall, we exclude kickoffs here
+pbp <- pbp %>% mutate(LastPlayOfDrive = ifelse( 
+  (is.na(td_team) &
+     (punt_attempt %in% 1 | play_type %in% "punt" | (extra_point_attempt %in% 1 & (play_type != "no_play" | (str_detect(pbp$desc, "(enforced between downs)")))) | 
+        play_type %in% "extra_point" |  two_point_attempt %in% 1 | (str_detect(pbp$desc, "(two-point)") & penalty %in% 0) | 
+        (str_detect(pbp$desc, "(TWO-POINT)") & penalty %in% 0) | (str_detect(pbp$desc, "(Two-point)") & penalty %in% 0) |
+        (str_detect(pbp$desc, "(Two-Point)") & penalty %in% 0) | field_goal_result %in% "missed" | field_goal_result %in% "blocked" |
+        field_goal_result %in% "made" | field_goal_attempt %in% 1 | interception %in% 1 | safety %in% 1 |
+        fumble_lost %in% 1 | fourth_down_failed %in% 1 | LastPlayOfHalf %in% 1)), 1, 0)
+)
+LastPlayOfDrive_Original <- pbp %>% filter(LastPlayOfDrive == 1)
+
+# This is just a dummy variable that will be fixed later
+pbp <- pbp %>%
+  mutate(NewDrive = 0)
+
+pbp <- pbp %>% group_by(game_id) %>% 
+  mutate(NewDrive = ifelse(FirstPlayOfGame == 1, 1, 
+                           ifelse(lag(LastPlayOfDrive == 1), 1 + lag(NewDrive), lag(NewDrive)))) %>%
+  ungroup()
+
+pbp <- pbp %>% group_by(game_id) %>% 
+  mutate(NewDrive = cumsum(NewDrive)) %>%
+  ungroup()
+
+# The middle number may be replaced with whatever column NewDrive is in
+pbp <- pbp %>% select(1:19, 347, 20:346)
+pbp <- pbp %>% select(-"drive", -"fixed_drive")
+
+# This is to fix XPs with incorrect fixed_drive_result, EVEN PENALIZED/RE-DONE ONES
+PATsToBeFixed <- pbp %>% filter(!fixed_drive_result %in% "Touchdown" & !fixed_drive_result %in% "Opp touchdown" &
+                                  (play_type == "extra_point" | extra_point_attempt == 1 | two_point_attempt == 1 |
+                          (str_detect(pbp$desc, "(two-point)") & !play_type %in% "kickoff") | 
+                            (str_detect(pbp$desc, "(TWO-POINT)") & !play_type %in% "kickoff") | 
+                            (str_detect(pbp$desc, "(Two-point)") & !play_type %in% "kickoff") | 
+                            (str_detect(pbp$desc, "(Two-Point)") & !play_type %in% "kickoff") |
+                            (str_detect(pbp$desc, "(extra point)") & !play_type %in% "kickoff") | 
+                            (str_detect(pbp$desc, "(EXTRA POINT)") & !play_type %in% "kickoff") | 
+                            (str_detect(pbp$desc, "(Extra Point)") & !play_type %in% "kickoff") | 
+                            (str_detect(pbp$desc, "(Extra point)") & !play_type %in% "kickoff")))
+
+OFFPATsToBeFixed <- pbp %>% filter(!fixed_drive_result %in% "Touchdown" & !fixed_drive_result %in% "Opp touchdown" &
+                      (play_type == "extra_point" | extra_point_attempt == 1 | two_point_attempt == 1 |
+                         (str_detect(pbp$desc, "(two-point)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(TWO-POINT)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(Two-point)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(Two-Point)") & !play_type %in% "kickoff") |
+                         (str_detect(pbp$desc, "(extra point)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(EXTRA POINT)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(Extra Point)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(Extra point)") & !play_type %in% "kickoff")) &
+                         (lag(td_team) == lag(posteam)))
+
+OFFPATsToBeFixedVec <- OFFPATsToBeFixed$play_id
+pbp[OFFPATsToBeFixedVec, "fixed_drive_result"] <- "Touchdown"
+pbp[OFFPATsToBeFixedVec, "drive_end_transition"] <- "Touchdown"
+
+DEFPATsToBeFixed <- pbp %>% filter(!fixed_drive_result %in% "Touchdown" & !fixed_drive_result %in% "Opp touchdown" &
+                      (play_type == "extra_point" | extra_point_attempt == 1 | two_point_attempt == 1 |
+                         (str_detect(pbp$desc, "(two-point)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(TWO-POINT)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(Two-point)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(Two-Point)") & !play_type %in% "kickoff") |
+                         (str_detect(pbp$desc, "(extra point)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(EXTRA POINT)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(Extra Point)") & !play_type %in% "kickoff") | 
+                         (str_detect(pbp$desc, "(Extra point)") & !play_type %in% "kickoff")) &
+                         (lag(td_team) != lag(posteam)))
+
+DEFPATsToBeFixedVec <- DEFPATsToBeFixed$play_id
+pbp[DEFPATsToBeFixedVec, "fixed_drive_result"] <- "Opp touchdown"
+pbp[DEFPATsToBeFixedVec, "drive_end_transition"] <- "Opp touchdown"
+
+MISCPATsToBeFixed <- PATsToBeFixed %>% 
+  filter(!play_id %in% OFFPATsToBeFixedVec & !play_id %in% DEFPATsToBeFixedVec)
+MISCPATsToBeFixedVec <- MISCPATsToBeFixed$play_id
+pbp[MISCPATsToBeFixedVec, "fixed_drive_result"] <- "Opp touchdown"
+pbp[MISCPATsToBeFixedVec, "drive_end_transition"] <- "Opp touchdown"
+
+# These are why we know the MISC PATs are all defensive touchdowns
+# MISCPATsFix_MINUSONE_Vec <- (-1) + MISCPATsToBeFixedVec
+# View(pbp[MISCPATsFix_MINUSONE_Vec, ])
+# MISCPATsFix_MINUSTWO_Vec <- (-2) + MISCPATsToBeFixedVec
+# View(pbp[MISCPATsFix_MINUSTWO_Vec, ])
+
+pbp <- pbp %>% group_by(game_id, game_half) %>% 
+  mutate(LastDriveOfHalf = as.numeric(NewDrive == max(NewDrive))) %>% 
+  ungroup()
+
+pbp <- pbp %>% group_by(game_id) %>% 
+  mutate(LastDriveOfGame = as.numeric(NewDrive == max(NewDrive))) %>% 
+  ungroup()
+
+# Many of these are end of game - use the max(NewDrive) to filter those
+WrongLabelLastDriveOfHalf <- pbp %>% filter(is.na(fixed_drive_result) & LastDriveOfHalf == 1)
+WrongLabelLastDriveID <- WrongLabelLastDriveOfHalf$play_id
+pbp[WrongLabelLastDriveID, "fixed_drive_result"] <- "End of half"
+
+Last_Play_Of_Drive_Info <- pbp %>%
+  group_by(game_id, NewDrive) %>%
+  filter(play_id == max(play_id)) %>%
+  ungroup() %>%
+  select(game_id, NewDrive, REAL_drive_result = fixed_drive_result)
+
+pbp <- pbp %>%
+  merge(Last_Play_Of_Drive_Info, by = c("game_id", "NewDrive"))
+pbp <- arrange(pbp, play_id)
+
+# NOW, we can clearly use REAL_drive_result in place of fixed_drive_result
+pbp <- pbp %>% select(-"fixed_drive_result")
+# The end number can be replaced with however many columns pbp has
+pbp <- pbp %>% select(1, 3:20, "NewDrive", 21:348)
+
+
+# NOW: WE ACTUALLY MAKE THE NewSeries variable
+# One major flaw of original series is that PATs count as their own series
+pbp <- pbp %>% mutate(LastPlayOfSeries = ifelse( 
+  (is.na(td_team) &
+     (LastPlayOfDrive %in% 1 | first_down %in% 1 | punt_attempt %in% 1 | play_type %in% "punt" | 
+        (extra_point_attempt %in% 1 & (play_type != "no_play" | (str_detect(pbp$desc, "(enforced between downs)")))) | 
+        play_type %in% "extra_point" |  two_point_attempt %in% 1 | (str_detect(pbp$desc, "(two-point)") & penalty %in% 0) | 
+        (str_detect(pbp$desc, "(TWO-POINT)") & penalty %in% 0) | (str_detect(pbp$desc, "(Two-point)") & penalty %in% 0) |
+        (str_detect(pbp$desc, "(Two-Point)") & penalty %in% 0) | field_goal_result %in% "missed" | field_goal_result %in% "blocked" |
+        field_goal_result %in% "made" | field_goal_attempt %in% 1 | interception %in% 1 | safety %in% 1 |
+        fumble_lost %in% 1 | fourth_down_failed %in% 1 | LastPlayOfHalf %in% 1)), 1, 0)
+)
+
+pbp <- pbp %>%
+  mutate(NewSeries = 0)
+
+pbp <- pbp %>% group_by(game_id) %>% 
+  mutate(NewSeries = ifelse(FirstPlayOfGame == 1, 1, 
+                            ifelse(lag(LastPlayOfSeries == 1), 1 + lag(NewSeries), lag(NewSeries)))) %>%
+  ungroup()
+
+pbp <- pbp %>% group_by(game_id) %>% 
+  mutate(NewSeries = cumsum(NewSeries)) %>%
+  ungroup()
+
+# Examples of series being less than NewSeries (i.e., discrepancies not b/c of PATs)
+# View(pbp %>% filter(series < NewSeries) %>% select(1:25, "series", "NewSeries"))
+# View(pbp %>% filter(game_id == "1999_03_SF_ARI") %>% select(1:25, "series", "NewSeries"))
+# Mine is correct b/c unncessary roughness penalty
+# View(pbp %>% filter(game_id == "1999_08_CLE_NO") %>% select(1:25, "series", "NewSeries"))
+# Mine is correct b/c muffed punt recovery
+# View(pbp %>% filter(game_id == "1999_08_SEA_GB") %>% select(1:25, "series", "NewSeries"))
+# Mine is correct b/c muffed punt recovery
+# View(pbp %>% filter(game_id == "2001_04_WAS_NYG") %>% select(1:25, "series", "NewSeries"))
+# Mine is correct b/c muffed punt recovery
+# View(pbp %>% filter(game_id == "2005_10_SF_CHI") %>% select(1:25, "series", "NewSeries"))
+# Mine is correct b/c muffed punt recovery
+# View(pbp %>% filter(game_id == "2012_06_DEN_SD") %>% select(1:25, "series", "NewSeries"))
+# Mine is correct b/c muffed punt recovery
+# View(pbp %>% filter(game_id == "2013_03_KC_PHI") %>% select(1:25, "series", "NewSeries"))
+# Mine is correct b/c muffed punt recovery
+# View(pbp %>% filter(game_id == "2014_05_HOU_DAL") %>% select(1:25, "series", "NewSeries"))
+# Mine is correct b/c muffed punt recovery
+
+# The middle number may be replaced with whatever column NewSeries is in
+pbp <- pbp %>% select(1:299, 348, 300:347)
+# pbp <- pbp %>% select(-"series")
