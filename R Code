@@ -564,5 +564,5 @@ pbp <- pbp %>% group_by(game_id) %>%
 # Mine is correct b/c muffed punt recovery
 
 # The middle number may be replaced with whatever column NewSeries is in
-pbp <- pbp %>% select(1:299, 348, 300:347)
+pbp <- pbp %>% select(1:299, 350, 300:349)
 # pbp <- pbp %>% select(-"series")
