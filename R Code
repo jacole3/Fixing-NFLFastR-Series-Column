@@ -565,7 +565,8 @@ pbp <- pbp %>% group_by(game_id) %>%
 
 # The middle number may be replaced with whatever column NewSeries is in
 pbp <- pbp %>% select(1:299, 350, 300:349)
-# pbp <- pbp %>% select(-"series")
+# Take out column we no longer need
+pbp <- pbp %>% select(-"series")
 
 # NOTE: these are almost all, but not exclusively, PATs/Two-Point
 # View(pbp %>% filter(is.na(series_result)))
@@ -665,4 +666,4 @@ pbp <- pbp %>%
   mutate(series_result = (ifelse(!is.na(series_result), series_result, END_series_result)))
 # THEN, delete one of the columns (don't need both) and fix column order
 pbp <- pbp %>% select(-"END_series_result")
-pbp <- pbp %>% select(1, 3:265, "series_result", 266:351)
+pbp <- pbp %>% select(1, 3:265, "NewSeries", 266:350)
