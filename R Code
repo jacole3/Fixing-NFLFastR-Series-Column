@@ -566,3 +566,103 @@ pbp <- pbp %>% group_by(game_id) %>%
 # The middle number may be replaced with whatever column NewSeries is in
 pbp <- pbp %>% select(1:299, 350, 300:349)
 # pbp <- pbp %>% select(-"series")
+
+# NOTE: these are almost all, but not exclusively, PATs/Two-Point
+# View(pbp %>% filter(is.na(series_result)))
+# SEPARATE THESE INTO PATs/Two-Point, and "other" plays
+
+# These ones are the PATs/Two-Point
+SeriesResult_Wrong_PATs <- pbp %>% filter(is.na(series_result)) %>% 
+  filter(play_type == "extra_point" | extra_point_attempt == 1 | two_point_attempt == 1 |
+           (str_detect(desc, "(two-point)") & !play_type %in% "kickoff") | 
+           (str_detect(desc, "(TWO-POINT)") & !play_type %in% "kickoff") | 
+           (str_detect(desc, "(Two-point)") & !play_type %in% "kickoff") | 
+           (str_detect(desc, "(Two-Point)") & !play_type %in% "kickoff") |
+           (str_detect(desc, "(extra point)") & !play_type %in% "kickoff") | 
+           (str_detect(desc, "(EXTRA POINT)") & !play_type %in% "kickoff") | 
+           (str_detect(desc, "(Extra Point)") & !play_type %in% "kickoff") | 
+           (str_detect(desc, "(Extra point)") & !play_type %in% "kickoff"))
+SeriesResult_Wrong_PATs_Vec <- SeriesResult_Wrong_PATs$play_id
+
+SeriesResult_PATs_OffTD <- SeriesResult_Wrong_PATs %>%
+  filter(REAL_drive_result == "Touchdown")
+SeriesResult_PATs_OffTD_Vec <- SeriesResult_PATs_OffTD$play_id
+
+SeriesResult_PATs_DefTD <- SeriesResult_Wrong_PATs %>%
+  filter(REAL_drive_result == "Opp touchdown")
+SeriesResult_PATs_DefTD_Vec <- SeriesResult_PATs_DefTD$play_id
+
+pbp[SeriesResult_PATs_OffTD_Vec, "series_result"] <- "Touchdown"
+pbp[SeriesResult_PATs_DefTD_Vec, "series_result"] <- "Opp touchdown"
+
+# View(pbp %>% filter(is.na(series_result)))
+# For the rest, look into using group_by with LastPlayOfSeries
+
+# These two may get re-done after "Project Plays" for a given project
+pbp <- pbp %>% group_by(game_id, NewSeries) %>% 
+  mutate(FirstPlayOfSeries = as.numeric(play_id == min(play_id))) %>% 
+  ungroup()
+
+pbp <- pbp %>% group_by(game_id, NewSeries) %>% 
+  mutate(LastPlayOfSeries = as.numeric(play_id == max(play_id))) %>% 
+  ungroup()
+
+# View(pbp %>% filter(is.na(series_result) & LastPlayOfSeries == 1))
+# All of these are ones that should get changed to "End of half"
+
+SeriesResult_ShouldBeEndOfHalf <- pbp %>% filter(is.na(series_result) & LastPlayOfSeries == 1)
+SeriesResult_ShouldBeEndOfHalf_Vec <- SeriesResult_ShouldBeEndOfHalf$play_id
+pbp[SeriesResult_ShouldBeEndOfHalf_Vec, "series_result"] <- "End of half"
+
+# THEN, must change the incorrect PATs to what they should be
+
+SeriesResult_EndOfHalf_PATs <- pbp %>% filter(series_result == "End of half" & LastPlayOfSeries == 1 &
+                                                (play_type == "extra_point" | extra_point_attempt == 1 | two_point_attempt == 1 |
+                                                   (str_detect(desc, "(two-point)") & !play_type %in% "kickoff") | 
+                                                   (str_detect(desc, "(TWO-POINT)") & !play_type %in% "kickoff") | 
+                                                   (str_detect(desc, "(Two-point)") & !play_type %in% "kickoff") | 
+                                                   (str_detect(desc, "(Two-Point)") & !play_type %in% "kickoff") |
+                                                   (str_detect(desc, "(extra point)") & !play_type %in% "kickoff") | 
+                                                   (str_detect(desc, "(EXTRA POINT)") & !play_type %in% "kickoff") | 
+                                                   (str_detect(desc, "(Extra Point)") & !play_type %in% "kickoff") | 
+                                                   (str_detect(desc, "(Extra point)") & !play_type %in% "kickoff")))
+# Entering 2020, it's just this one
+# View(pbp %>% filter(game_id == "2000_09_TEN_WAS", game_half == "Half1") %>% select(1:29, "series_result"))
+pbp[63245, "series_result"] <- "Opp touchdown"
+
+# Now, address remainder of the incorrect series_result with group_by
+
+Last_Play_Of_Series_Info <- pbp %>%
+  group_by(game_id, NewSeries) %>%
+  filter(play_id == max(play_id)) %>%
+  ungroup() %>%
+  select(game_id, NewSeries, END_series_result = series_result)
+# View(Last_Play_Of_Series_Info %>% filter(is.na(END_series_result))), should be empty
+
+pbp <- pbp %>%
+  merge(Last_Play_Of_Series_Info, by = c("game_id", "NewSeries"))
+pbp <- arrange(pbp, play_id)
+# View(pbp %>% filter(is.na(END_series_result))), should be empty
+
+Disagreements_Series_Result <- pbp %>% filter(
+  !is.na(series_result) & END_series_result != series_result) %>% 
+  select(1:29, "series_result", "END_series_result")
+Disagreements_Series_Result_Vec <- Disagreements_Series_Result$play_id
+
+Disagreements_Series_Result_SCORING <- Disagreements_Series_Result %>%
+  filter(series_result == "Opp touchdown" | series_result == "Touchdown" | series_result == "Field goal")
+Disagreements_Series_Result_SCORING_Vec <- Disagreements_Series_Result_SCORING$play_id
+
+Disagreements_Series_Result_NonSCORING <- Disagreements_Series_Result %>%
+  filter(!play_id %in% Disagreements_Series_Result_SCORING_Vec)
+Disagreements_Series_Result_NonSCORING_Vec <- Disagreements_Series_Result_NonSCORING$play_id
+
+pbp[Disagreements_Series_Result_SCORING_Vec, "END_series_result"] <- pbp[Disagreements_Series_Result_SCORING_Vec, "series_result"]
+pbp[Disagreements_Series_Result_NonSCORING_Vec, "series_result"] <- pbp[Disagreements_Series_Result_NonSCORING_Vec, "END_series_result"]
+
+# NOW, fix these: View(pbp %>% filter(is.na(series_result)))
+pbp <- pbp %>% 
+  mutate(series_result = (ifelse(!is.na(series_result), series_result, END_series_result)))
+# THEN, delete one of the columns (don't need both) and fix column order
+pbp <- pbp %>% select(-"END_series_result")
+pbp <- pbp %>% select(1, 3:265, "series_result", 266:351)
