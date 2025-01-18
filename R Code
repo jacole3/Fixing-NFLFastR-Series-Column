@@ -596,17 +596,7 @@ SeriesResult_PATs_DefTD_Vec <- SeriesResult_PATs_DefTD$play_id
 pbp[SeriesResult_PATs_OffTD_Vec, "series_result"] <- "Touchdown"
 pbp[SeriesResult_PATs_DefTD_Vec, "series_result"] <- "Opp touchdown"
 
-# View(pbp %>% filter(is.na(series_result)))
-# For the rest, look into using group_by with LastPlayOfSeries
-
-# These two may get re-done after "Project Plays" for a given project
-pbp <- pbp %>% group_by(game_id, NewSeries) %>% 
-  mutate(FirstPlayOfSeries = as.numeric(play_id == min(play_id))) %>% 
-  ungroup()
-
-pbp <- pbp %>% group_by(game_id, NewSeries) %>% 
-  mutate(LastPlayOfSeries = as.numeric(play_id == max(play_id))) %>% 
-  ungroup()
+# View(pbp %>% filter(is.na(series_result))), time to fix these
 
 # View(pbp %>% filter(is.na(series_result) & LastPlayOfSeries == 1))
 # All of these are ones that should get changed to "End of half"
@@ -666,4 +656,18 @@ pbp <- pbp %>%
   mutate(series_result = (ifelse(!is.na(series_result), series_result, END_series_result)))
 # THEN, delete one of the columns (don't need both) and fix column order
 pbp <- pbp %>% select(-"END_series_result")
-pbp <- pbp %>% select(1, 3:265, "NewSeries", 266:350)
+pbp <- pbp %>% relocate(NewSeries, .after = cpoe)
+
+# View(pbp %>% filter(is.na(NewSeries))) - this should be empty
+
+# Now make it so that any PAT or kickoff has NA for NewSeries and REAL_series_result
+pbp <- pbp %>% mutate(NewSeries = ifelse(is.na(down), NA, NewSeries))
+pbp <- pbp %>% mutate(REAL_series_result = ifelse(is.na(down), NA, REAL_series_result))
+
+pbp <- pbp %>% group_by(game_id, NewSeries) %>% 
+  mutate(FirstPlayOfSeries = as.numeric(play_id == min(play_id))) %>% 
+  ungroup()
+
+pbp <- pbp %>% group_by(game_id, NewSeries) %>% 
+  mutate(LastPlayOfSeries = as.numeric(play_id == max(play_id))) %>% 
+  ungroup()
