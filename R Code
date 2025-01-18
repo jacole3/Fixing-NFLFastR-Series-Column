@@ -671,3 +671,6 @@ pbp <- pbp %>% group_by(game_id, NewSeries) %>%
 pbp <- pbp %>% group_by(game_id, NewSeries) %>% 
   mutate(LastPlayOfSeries = as.numeric(play_id == max(play_id))) %>% 
   ungroup()
+
+pbp <- pbp %>% mutate(FirstPlayOfSeries = ifelse(is.na(down), NA, FirstPlayOfSeries))
+pbp <- pbp %>% mutate(LastPlayOfSeries = ifelse(is.na(down), NA, LastPlayOfSeries))
